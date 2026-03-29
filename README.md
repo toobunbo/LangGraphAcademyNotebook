@@ -105,3 +105,139 @@ graph = builder.compile()
 # (Tùy chọn) Vẽ sơ đồ ra màn hình
 # display(Image(graph.get_graph().draw_mermaid_png()))
 ```
+
+---
+---
+
+# 📘 Sổ Tay LangGraph - Phần 2: Từ Chatbot đến Tác tử AI tự trị (Agent)
+
+---
+
+## 5. Kiến trúc ReAct (Trái tim của AI Agent)
+
+Sự khác biệt lớn nhất giữa một **Router** (chỉ biết định tuyến 1 lần) và một **Agent** (tác tử tự trị) nằm ở **Vòng lặp (Loop)**. Kiến trúc này được gọi là **ReAct** (Reason + Act).
+
+- **Reason (Suy luận):** AI suy nghĩ xem cần dùng công cụ gì.
+- **Act (Hành động):** AI gọi công cụ.
+- **Observe (Quan sát):** Kết quả từ công cụ được **trả ngược lại** cho AI để nó tiếp tục suy nghĩ và hành động, cho đến khi hoàn thành nhiệm vụ.
+```python
+# CODE CŨ (Router): Chạy tool xong là kết thúc
+builder.add_edge("tools", END)
+
+# CODE MỚI (Agent): Chạy tool xong, cầm kết quả quay về nộp cho AI
+builder.add_edge("tools", "assistant")
+```
+
+---
+
+## 6. Tinh chỉnh Mô hình AI (Prompt & Config)
+
+### 6.1. Khắc phục lỗi "Gọi tool song song" (Parallel Tool Calls)
+
+Mặc định, các AI xịn (như OpenAI) có khả năng gọi nhiều tool cùng lúc. Nhưng đôi khi ta muốn nó chạy tuần tự từng bước một (ví dụ: tìm tên CEO xong mới được gửi email).
+
+- **Với OpenAI:** Dùng `bind_tools(tools, parallel_tool_calls=False)`.
+- **Với Google Gemini:** Bỏ tham số này đi vì cơ chế API khác nhau, chỉ cần `bind_tools(tools)`.
+
+### 6.2. Gắn "Nội quy" bằng `SystemMessage`
+
+Để AI không bị lan man, ta ghim một câu lệnh định hướng lên trên cùng của lịch sử chat trước khi đưa cho AI đọc.
+```python
+from langchain_core.messages import SystemMessage
+
+sys_msg = SystemMessage(content="Bạn là chuyên gia toán học. Chỉ tập trung giải toán.")
+
+def assistant(state: MessagesState):
+    # Kẹp [sys_msg] lên đầu danh sách tin nhắn hiện tại
+    return {"messages": [llm.invoke([sys_msg] + state["messages"])]}
+```
+
+---
+
+## 7. Các công cụ xây sẵn (Pre-built) của LangGraph
+
+Để không phải viết đi viết lại những đoạn code nhàm chán, LangGraph cung cấp sẵn các tiện ích tích hợp:
+
+**`ToolNode` — Xưởng thực thi tự động:** Tự động nhận lệnh từ AI, lôi hàm Python ra chạy, và đóng gói kết quả trả về State.
+```python
+from langgraph.prebuilt import ToolNode
+
+builder.add_node("tools", ToolNode(tools))  # Truyền danh sách công cụ vào đây
+```
+
+**`tools_condition` — Cảnh sát giao thông:** Hàm kiểm tra xem AI vừa trả lời cái gì để phân luồng.
+
+- Nếu AI gọi tool ➡️ Rẽ vào trạm `"tools"`.
+- Nếu AI trả lời bằng văn bản bình thường ➡️ Rẽ ra cổng `END`.
+```python
+from langgraph.prebuilt import tools_condition
+
+builder.add_conditional_edges("assistant", tools_condition)
+```
+
+---
+
+## 8. Cấp Trí nhớ cho Agent (Memory & Checkpointer)
+
+Mặc định, LangGraph mắc bệnh **"não cá vàng"** — quên hết mọi thứ sau khi chạy xong. Để nó có thể trò chuyện dài hơi, ta cần thêm cơ chế lưu trữ.
+
+- **Checkpointer:** Giống như một cái **Tủ Hồ Sơ**. Nó tự động chụp ảnh (snapshot) lại State sau mỗi bước chạy.
+- **`thread_id`:** Mã số của cuộc hội thoại — để AI phân biệt người này với người khác.
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+# Khởi tạo Tủ Hồ Sơ (lưu vào RAM)
+memory = MemorySaver()
+
+# Giao tủ cho đồ thị khi compile
+react_agent = builder.compile(checkpointer=memory)
+
+# Khi gọi AI, phải đưa kèm "Thẻ tên" (thread_id)
+config = {"configurable": {"thread_id": "phong_chat_cua_an"}}
+react_agent.invoke({"messages": [("user", "Tôi tên là An")]}, config)
+```
+
+---
+
+## 🌟 9. Bộ Khung Hoàn Chỉnh (Master Template)
+
+Chỉ với đoạn code này, bạn đã sở hữu một AI Agent có tư duy, có khả năng dùng công cụ và có trí nhớ:
+```python
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import SystemMessage
+
+# 1. State & Tools
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+tools = [cong_cu_1, cong_cu_2]
+llm_with_tools = llm.bind_tools(tools)
+sys_msg = SystemMessage(content="Bạn là một trợ lý ảo siêu việt.")
+
+# 2. Định nghĩa Node AI
+def assistant(state: State):
+    return {"messages": [llm_with_tools.invoke([sys_msg] + state["messages"])]}
+
+# 3. Xây dựng đồ thị
+builder = StateGraph(State)
+builder.add_node("assistant", assistant)
+builder.add_node("tools", ToolNode(tools))
+
+# 4. Phân luồng giao thông (Routing)
+builder.add_edge(START, "assistant")
+builder.add_conditional_edges("assistant", tools_condition)
+builder.add_edge("tools", "assistant")  # Vòng lặp ReAct
+
+# 5. Đóng gói với Trí nhớ
+memory = MemorySaver()
+app = builder.compile(checkpointer=memory)
+
+# 6. Sử dụng
+config = {"configurable": {"thread_id": "demo_1"}}
+response = app.invoke({"messages": [("user", "Hãy làm nhiệm vụ này...")]}, config)
+```
